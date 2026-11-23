@@ -1,0 +1,63 @@
+name: merge-fix
+on:
+  workflow_dispatch:
+    inputs:
+      feature_branch:
+        required: true
+        default: feat/type-env-metrics
+      push:
+        required: false
+        default: "false"
+permissions:
+  contents: write
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_branch }}
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - name: merge and resolve
+        run: |
+          set -euo pipefail
+          git config user.name "merge-assist"
+          git config user.email "merge-assist@users.noreply.github.com"
+          git remote add upstream https://github.com/StellarFoundry/soroban-security-scanner.git
+          git fetch upstream main
+          ORIG=$(git rev-parse HEAD)
+          echo "ORIG=$ORIG" >> "$GITHUB_ENV"
+          git merge --no-commit upstream/main || true
+          echo "=== conflicts ==="
+          git diff --name-only --diff-filter=U
+          git checkout --theirs -- crates/soroban-scan-cli/src/lsp.rs
+          git add crates/soroban-scan-cli/src/lsp.rs
+          REMAIN=$(git diff --name-only --diff-filter=U || true)
+          if [ -n "$REMAIN" ]; then echo "UNRESOLVED: $REMAIN"; exit 1; fi
+          git commit -m "Merge upstream/main into feat/type-env-metrics"
+          cargo fmt --all
+          git add -A
+          git commit -m "style: apply rustfmt after merge" || echo "no fmt changes"
+      - name: gate fmt
+        run: cargo fmt --all -- --check
+      - name: gate clippy
+        run: set -o pipefail; cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tee gate-clippy.log
+      - name: gate test
+        run: set -o pipefail; cargo test --all --all-features 2>&1 | tee gate-test.log
+      - name: diff patch
+        if: always()
+        run: git diff "${ORIG:-HEAD}" HEAD > merge.patch || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merge-result
+          path: |
+            merge.patch
+            gate-clippy.log
+            gate-test.log
+          if-no-files-found: ignore
+      - name: push
+        if: ${{ inputs.push == 'true' }}
+        run: git push origin HEAD:${{ inputs.feature_branch }}
